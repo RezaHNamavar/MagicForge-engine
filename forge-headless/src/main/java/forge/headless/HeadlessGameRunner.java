@@ -290,6 +290,9 @@ public class HeadlessGameRunner {
             Map<String, String> le = new LinkedHashMap<>();
             le.put("type", entry.type.name());
             le.put("message", entry.message);
+            if (entry.cardType != null) {
+                le.put("card_type", entry.cardType);
+            }
             logEntries.add(le);
         }
         result.put("log", logEntries);

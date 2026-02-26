@@ -71,7 +71,20 @@ public class GameLogFormatter extends IGameEventVisitor.Base<GameLogEntry> {
     @Override
     public GameLogEntry visit(GameEventSpellResolved ev) {
         String messageForLog = ev.hasFizzled() ? localizer.getMessage("lblLogCardAbilityFizzles", ev.spell().getHostCard().toString()) : ev.spell().getStackDescription();
-        return new GameLogEntry(GameLogEntryType.STACK_RESOLVE, messageForLog);
+        // Extract the card's primary type so the headless runner can classify it
+        Card card = ev.spell().getHostCard();
+        String cardType = null;
+        if (card != null && card.getType() != null) {
+            if (card.isCreature()) cardType = "Creature";
+            else if (card.isPlaneswalker()) cardType = "Planeswalker";
+            else if (card.isEnchantment()) cardType = "Enchantment";
+            else if (card.isArtifact()) cardType = "Artifact";
+            else if (card.isBattle()) cardType = "Battle";
+            else if (card.isInstant()) cardType = "Instant";
+            else if (card.isSorcery()) cardType = "Sorcery";
+            else if (card.isLand()) cardType = "Land";
+        }
+        return new GameLogEntry(GameLogEntryType.STACK_RESOLVE, messageForLog, cardType);
     }
 
     @Override

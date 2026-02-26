@@ -7,11 +7,16 @@ public class GameLogEntry implements Serializable {
 
     public final String message;
     public final GameLogEntryType type;
-    // might add here date and some other fields
+    public final String cardType; // e.g. "Creature", "Enchantment", "Instant" — null for non-spell entries
 
     GameLogEntry(final GameLogEntryType type0, final String messageIn) {
+        this(type0, messageIn, null);
+    }
+
+    GameLogEntry(final GameLogEntryType type0, final String messageIn, final String cardTypeIn) {
         type = type0;
         message = messageIn;
+        cardType = cardTypeIn;
     }
 
     @Override
