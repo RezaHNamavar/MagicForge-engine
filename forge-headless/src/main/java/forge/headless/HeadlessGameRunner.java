@@ -9,15 +9,20 @@ import forge.StaticData;
 import forge.ai.AIOption;
 import forge.ai.AiProfileUtil;
 import forge.ai.LobbyPlayerAi;
+import forge.card.CardRules;
 import forge.card.CardType;
+import forge.deck.CardPool;
 import forge.deck.Deck;
 import forge.deck.io.DeckSerializer;
+import forge.item.PaperCard;
 import forge.game.*;
 import forge.game.card.Card;
 import forge.game.card.CardUtil;
 import forge.game.event.GameEventCardChangeZone;
 import forge.game.event.GameEventTurnBegan;
+import forge.game.player.IGameEntitiesFactory;
 import forge.game.player.Player;
+import forge.game.player.PlayerController;
 import forge.game.player.RegisteredPlayer;
 import forge.game.zone.ZoneType;
 import forge.util.FileSection;
@@ -34,9 +39,13 @@ public class HeadlessGameRunner {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
+    // Mode: "ai" (default) for AI vs AI, "llm" for LLM vs AI
+    private static String mode = "ai";
+    private static PrintStream realStdout;
+
     public static void main(String[] args) {
         if (args.length < 2) {
-            System.err.println("Usage: HeadlessGameRunner <deck_a_path> <deck_b_path> [--res <res_dir>] [--games <n>]");
+            System.err.println("Usage: HeadlessGameRunner <deck_a_path> <deck_b_path> [--res <res_dir>] [--games <n>] [--mode ai|llm]");
             System.exit(1);
         }
 
@@ -50,6 +59,8 @@ public class HeadlessGameRunner {
                 resDir = args[++i];
             } else if ("--games".equals(args[i]) && i + 1 < args.length) {
                 numGames = Integer.parseInt(args[++i]);
+            } else if ("--mode".equals(args[i]) && i + 1 < args.length) {
+                mode = args[++i];
             }
         }
 
@@ -64,11 +75,12 @@ public class HeadlessGameRunner {
         }
 
         // Redirect stdout to stderr during initialization and gameplay
-        // so Forge's internal System.out.println calls don't pollute our JSON output
-        PrintStream realStdout = System.out;
+        // so Forge's internal System.out.println calls don't pollute our JSON/protocol output
+        realStdout = System.out;
         System.setOut(System.err);
 
         System.err.println("=== MagicForge Headless Runner ===");
+        System.err.println("Mode: " + mode);
         System.err.println("Res directory: " + resDir);
 
         try {
@@ -84,6 +96,11 @@ public class HeadlessGameRunner {
             Deck deckB = loadDeck(deckBPath);
             System.err.println("Deck A: " + deckA.getName() + " (" + deckA.getMain().countAll() + " cards)");
             System.err.println("Deck B: " + deckB.getName() + " (" + deckB.getMain().countAll() + " cards)");
+
+            // In LLM mode, send deck info with oracle text before starting games
+            if ("llm".equals(mode)) {
+                sendDeckInfo(deckA, deckB);
+            }
 
             // Run games
             List<Map<String, Object>> results = new ArrayList<>();
@@ -101,6 +118,19 @@ public class HeadlessGameRunner {
 
                 System.err.println("Result: " + (winner != null ? winner + " wins" : "Draw")
                     + " on turn " + result.get("last_turn"));
+
+                // In LLM mode with multiple games, send per-game result
+                // so the Python side can run post-game analysis between games
+                if ("llm".equals(mode) && numGames > 1) {
+                    Map<String, Object> gameResult = new LinkedHashMap<>();
+                    gameResult.put("player_a", deckA.getName());
+                    gameResult.put("player_b", deckB.getName());
+                    gameResult.put("games", Collections.singletonList(result));
+                    realStdout.println("GAME_COMPLETE");
+                    realStdout.println(GSON.toJson(gameResult));
+                    realStdout.println("GAME_COMPLETE_END");
+                    realStdout.flush();
+                }
             }
 
             // Build summary
@@ -113,9 +143,17 @@ public class HeadlessGameRunner {
             summary.put("draws", draws);
             summary.put("games", results);
 
-            // Restore real stdout and output JSON
-            System.setOut(realStdout);
-            realStdout.println(GSON.toJson(summary));
+            if ("llm".equals(mode)) {
+                // LLM mode: send result via protocol on realStdout
+                realStdout.println("GAME_RESULT");
+                realStdout.println(GSON.toJson(summary));
+                realStdout.println("GAME_RESULT_END");
+                realStdout.flush();
+            } else {
+                // AI mode: restore stdout and output JSON
+                System.setOut(realStdout);
+                realStdout.println(GSON.toJson(summary));
+            }
 
         } catch (Exception e) {
             System.err.println("ERROR: " + e.getMessage());
@@ -199,12 +237,29 @@ public class HeadlessGameRunner {
     }
 
     private static Map<String, Object> runSingleGame(Deck deckA, Deck deckB, int gameNumber) {
-        // Create AI lobby players with proper profile
         Set<AIOption> aiOpts = EnumSet.noneOf(AIOption.class);
-        LobbyPlayerAi lobbyA = new LobbyPlayerAi(deckA.getName(), aiOpts);
-        LobbyPlayerAi lobbyB = new LobbyPlayerAi(deckB.getName(), aiOpts);
-        lobbyA.setAiProfile("Default");
-        lobbyB.setAiProfile("Default");
+
+        // Player A: LLM or AI depending on mode
+        forge.LobbyPlayer lobbyA;
+        if ("llm".equals(mode)) {
+            lobbyA = new LobbyPlayerLLM(deckA.getName(), realStdout);
+            System.err.println("Player A: LLM-controlled");
+        } else {
+            LobbyPlayerAi aiLobbyA = new LobbyPlayerAi(deckA.getName(), aiOpts);
+            aiLobbyA.setAiProfile("Default");
+            lobbyA = aiLobbyA;
+        }
+
+        // Player B: LLM or AI depending on mode
+        forge.LobbyPlayer lobbyB;
+        if ("llm".equals(mode)) {
+            lobbyB = new LobbyPlayerLLM(deckB.getName(), realStdout);
+            System.err.println("Player B: LLM-controlled");
+        } else {
+            LobbyPlayerAi aiLobbyB = new LobbyPlayerAi(deckB.getName(), aiOpts);
+            aiLobbyB.setAiProfile("Default");
+            lobbyB = aiLobbyB;
+        }
 
         // Create registered players
         RegisteredPlayer regA = new RegisteredPlayer(deckA).setPlayer(lobbyA);
@@ -379,6 +434,85 @@ public class HeadlessGameRunner {
                     "HAND:" + p.getName() + ":" + cardNames.size() + ":" + hand);
             }
         }
+    }
+
+    /**
+     * LobbyPlayer for LLM-controlled players. Creates a PlayerControllerLLM
+     * that communicates decisions via stdin/stdout protocol.
+     */
+    static class LobbyPlayerLLM extends forge.LobbyPlayer implements IGameEntitiesFactory {
+        private final PrintStream llmOut;
+
+        LobbyPlayerLLM(String name, PrintStream realStdout) {
+            super(name);
+            this.llmOut = realStdout;
+        }
+
+        @Override
+        public Player createIngamePlayer(Game game, int id) {
+            Player p = new Player(getName(), game, id);
+            PlayerControllerLLM controller = new PlayerControllerLLM(game, p, this, llmOut);
+            p.setFirstController(controller);
+            return p;
+        }
+
+        @Override
+        public PlayerController createMindSlaveController(Player master, Player slave) {
+            // Fall back to regular AI for mind slave effects
+            return new forge.ai.PlayerControllerAi(slave.getGame(), slave, this);
+        }
+
+        @Override
+        public void hear(forge.LobbyPlayer player, String message) { /* LLM is deaf. */ }
+    }
+
+    /**
+     * Send full deck info (with oracle text) to the Python bridge via protocol.
+     * This lets the LLM agents understand what each card actually does.
+     */
+    private static void sendDeckInfo(Deck deckA, Deck deckB) {
+        Map<String, Object> info = new LinkedHashMap<>();
+
+        info.put("deck_a", serializeDeckCards(deckA));
+        info.put("deck_b", serializeDeckCards(deckB));
+
+        realStdout.println("DECK_INFO");
+        realStdout.println(GSON.toJson(info));
+        realStdout.println("DECK_INFO_END");
+        realStdout.flush();
+
+        System.err.println("Sent deck info to LLM bridge");
+    }
+
+    private static Map<String, Object> serializeDeckCards(Deck deck) {
+        Map<String, Object> deckInfo = new LinkedHashMap<>();
+        deckInfo.put("name", deck.getName());
+
+        List<Map<String, Object>> cards = new ArrayList<>();
+        CardPool mainPool = deck.getMain();
+
+        for (Map.Entry<PaperCard, Integer> entry : mainPool) {
+            PaperCard paper = entry.getKey();
+            int quantity = entry.getValue();
+            CardRules rules = paper.getRules();
+
+            Map<String, Object> card = new LinkedHashMap<>();
+            card.put("count", quantity);
+            card.put("name", rules.getName());
+            card.put("mana_cost", rules.getManaCost() != null ? rules.getManaCost().toString() : "");
+            card.put("type", rules.getType() != null ? rules.getType().toString() : "");
+            card.put("oracle_text", rules.getOracleText() != null ? rules.getOracleText() : "");
+
+            if (rules.getType() != null && rules.getType().isCreature()) {
+                card.put("power", rules.getPower());
+                card.put("toughness", rules.getToughness());
+            }
+
+            cards.add(card);
+        }
+
+        deckInfo.put("cards", cards);
+        return deckInfo;
     }
 
     private static String findResDir() {

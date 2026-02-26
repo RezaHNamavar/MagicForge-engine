@@ -71,7 +71,7 @@ public class GameLogFormatter extends IGameEventVisitor.Base<GameLogEntry> {
     @Override
     public GameLogEntry visit(GameEventSpellResolved ev) {
         String messageForLog = ev.hasFizzled() ? localizer.getMessage("lblLogCardAbilityFizzles", ev.spell().getHostCard().toString()) : ev.spell().getStackDescription();
-        // Extract the card's primary type so the headless runner can classify it
+        // Include card type so the replay engine knows if this is a permanent or spell
         Card card = ev.spell().getHostCard();
         String cardType = null;
         if (card != null && card.getType() != null) {
